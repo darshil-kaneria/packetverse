@@ -1,6 +1,8 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import "./Stp.css";
+import StpPacketWorker from "./stpPacketWorker.js"; // Import the worker script
+
 
 // Helper function to get the smallest available ID greater than 1
 const getNextAvailableId = (usedIds) => {
@@ -11,17 +13,81 @@ const getNextAvailableId = (usedIds) => {
   return id;
 };
 
-// Helper function to get a random port status
-const getRandomPortStatus = () => Math.random() > 0.5 ? "Blocked" : "Unblocked";
-
 const Stp = () => {
   const [nodes, setNodes] = useState([]);
   const [links, setLinks] = useState([]);
+  const [packets, setPackets] = useState([]); // Store packets being transferred
   const [selectedNode, setSelectedNode] = useState(null);
   const [isLinking, setIsLinking] = useState(false);
+  const [hoveredPacket, setHoveredPacket] = useState(null); // Track hovered packet
+  const [workers, setWorkers] = useState({}); // Store Web Workers for each node
 
-  // Track used IDs
   const usedIds = new Set(nodes.map((node) => node.id));
+
+  useEffect(() => {
+    // Clean up workers on component unmount
+    return () => {
+      Object.values(workers).forEach((worker) => {
+        if (worker && typeof worker.terminate === "function") {
+          worker.terminate();
+        }
+      });
+    };
+  }, [workers]);
+
+  const init_stp = async () => {
+    console.log("STP Initiated");
+    console.log('workers:', workers);
+
+    // For each node, send out a message to all nodes except itself
+    nodes.forEach((node) => {
+      for (const key in workers) {
+        if (workers.hasOwnProperty(key) && key !== node.id.toString()) {
+        const worker = workers[key];
+        console.log(`Sending message to worker: ${key} from node: ${node.id}`);
+        var stp_packet = {
+          id: Math.random(), // Unique packet ID
+          source: node,
+          target: key,
+          progress: 0, // Initial progress from source to target (0 to 1)
+          rootId: node.id,
+          hopCount: 0,
+          nextHop: node.id,
+          speed_factor: 100
+        };
+        worker.postMessage({ type: "receivePacket", data: stp_packet });
+        }
+      }
+    });
+  };
+
+  const createWorkerForNode = (nodeId) => {
+    try {
+      const worker = new Worker(new URL('./stpPacketWorker.js', import.meta.url));
+      worker.postMessage({ type: "init", data: { nodeId: nodeId, rootId: nodeId, hopCount: 0, speed_factor: 100, nextHop: nodeId } });
+      console.log("Worker created for Node:", nodeId);
+      worker.onmessage = (e) => {
+        console.log(`Main thread received message from worker for Node ${nodeId}:`, e.data);
+        const { recv_type, nid, recv_packet } = e.data;
+        switch (recv_type) {
+          case "packetReceived":
+            nodes.forEach((node) => {
+              if (node.id === nodeId) {
+                node.rootId = recv_packet.rootId;
+                node.hopCount = recv_packet.hopCount + 1;
+                node.nextHop = recv_packet.nextHop;
+              }
+            });
+            break;
+          default:
+            console.error("Unknown message type:", recv_type);
+        }
+      };
+      return worker;
+    } catch (error) {
+      console.error("Error creating worker for node:", error);
+    }
+  };
 
   // Helper function to find or create a port for a node
   const getOrCreatePort = (node, targetId) => {
@@ -34,40 +100,65 @@ const Stp = () => {
   };
 
   // Add a new node
-  const handleCanvasClick = (e) => {
+  const handleCanvasClick = async (e) => {
     const canvas = e.target.getBoundingClientRect();
     const x = e.clientX - canvas.left;
     const y = e.clientY - canvas.top;
 
-    const clickedNode = nodes.find(
-      (node) => Math.hypot(node.x - x, node.y - y) < 30
-    );
+    const clickedNode = nodes.find((node) => Math.hypot(node.x - x, node.y - y) < 30);
 
     if (clickedNode) {
+      // If a node is clicked, select/deselect it
       if (isLinking) {
         if (selectedNode && selectedNode !== clickedNode) {
-          const sourcePort = getOrCreatePort(selectedNode, clickedNode.id);
-          const targetPort = getOrCreatePort(clickedNode, selectedNode.id);
-          setLinks([...links, { source: selectedNode, sourcePort, target: clickedNode, targetPort }]);
-          setIsLinking(false);
+          // Create a link if linking is in progress and nodes are different
+          const newLink = { source: selectedNode, target: clickedNode };
+          setLinks([...links, newLink]);
           setSelectedNode(null);
+          setIsLinking(false);
+
+          // Update ports for both nodes
+          setNodes((prevNodes) =>
+            prevNodes.map((node) => {
+              if (node === selectedNode) {
+                return {
+                  ...node,
+                  ports: [...node.ports, { portNumber: node.ports.length, targetId: clickedNode.id, status: "Blocked" }],
+                };
+              } else if (node === clickedNode) {
+                return {
+                  ...node,
+                  ports: [...node.ports, { portNumber: node.ports.length, targetId: selectedNode.id, status: "Blocked" }],
+                };
+              }
+              return node;
+            })
+          );
         }
       } else {
+        // Select or deselect node
         setSelectedNode((prev) => (prev === clickedNode ? null : clickedNode));
       }
     } else {
+      // Add new node if not clicking on an existing one
       if (!isLinking) {
-        // Assign smallest available ID
         const newId = getNextAvailableId(usedIds);
-        setNodes([...nodes, { 
-          id: newId, 
-          x, 
-          y, 
-          ports: [], 
-          rootId: newId, // Initialize rootId to its own ID
-          hopCount: 0 // Initialize hop count to 0
-        }]);
-        usedIds.add(newId); // Add the new ID to the set of used IDs
+        const newNode = {
+          id: newId,
+          x,
+          y,
+          ports: [],
+          rootId: newId,
+          hopCount: 0,
+          nextHop: newId,
+        };
+        setNodes([...nodes, newNode]);
+  
+        // Create a worker for the new node
+        const worker = createWorkerForNode(newNode.id);
+        if (worker) {
+            workers[newNode.id] = worker;
+        }
       } else {
         setIsLinking(false);
         setSelectedNode(null);
@@ -79,13 +170,16 @@ const Stp = () => {
   const handleDelete = () => {
     if (selectedNode) {
       setNodes(nodes.filter((node) => node !== selectedNode));
-      setLinks(
-        links.filter(
-          (link) =>
-            link.source !== selectedNode && link.target !== selectedNode
-        )
-      );
-      usedIds.delete(selectedNode.id); // Remove ID from used IDs
+      // Remove the worker associated with the selected node
+      for (const key in workers) {
+        if (workers.hasOwnProperty(key)) {
+          if (key == selectedNode.id) {
+            delete workers[key];
+          }
+        }
+      }
+      setLinks(links.filter((link) => link.source !== selectedNode && link.target !== selectedNode));
+      usedIds.delete(selectedNode.id);
       setSelectedNode(null);
     }
   };
@@ -97,13 +191,66 @@ const Stp = () => {
     }
   };
 
+  // Function to send a packet
+  const sendPacket = (sourceNode, targetNodeId) => {
+    const targetNode = nodes.find((node) => node.id === targetNodeId);
+    if (targetNode) {
+      // Create a packet object
+      const packet = {
+        id: Math.random(), // Unique packet ID
+        source: sourceNode,
+        target: targetNode,
+        progress: 0, // Initial progress from source to target (0 to 1)
+        rootId: sourceNode.rootId,
+        hopCount: sourceNode.hopCount + 1,
+        nextHop: targetNode.id,
+      };
+      setPackets([...packets, packet]);
+    }
+  };
+
+  // Update packet movement over time
+  const updatePackets = () => {
+    setPackets((prevPackets) =>
+      prevPackets
+        .map((packet) => {
+          if (packet.progress < 1) {
+            return { ...packet, progress: packet.progress + 0.02 }; // Increment progress
+          } else {
+            // Detect packet arrival at the target node and port
+            const targetPort = packet.target.ports.find(
+              (port) => port.targetId === packet.source.id
+            );
+            if (targetPort) {
+              console.log(
+                `Packet arrived at Node ${packet.target.id} on Port ${targetPort.portNumber}`
+              );
+            }
+            return null; // Remove packet once it's reached its destination
+          }
+        })
+        .filter((packet) => packet !== null)
+    );
+  };
+
+  // Start packet updates
+  React.useEffect(() => {
+    const interval = setInterval(updatePackets, 50); // Update packets every 50ms
+    return () => clearInterval(interval);
+  }, [packets]);
+
+  // Calculate the packet position along a link
+  const calculatePacketPosition = (packet) => {
+    const { source, target, progress } = packet;
+    const x = source.x + (target.x - source.x) * progress;
+    const y = source.y + (target.y - source.y) * progress;
+    return { x, y };
+  };
+
   return (
     <div className="canvas-container">
       <div className="canvas">
-        <motion.div
-          className="canvas-element"
-          onClick={handleCanvasClick}
-        >
+        <motion.div className="canvas-element" onClick={handleCanvasClick}>
           {/* Render links between nodes */}
           <svg className="link-line">
             {links.map((link, index) => (
@@ -149,32 +296,46 @@ const Stp = () => {
                   }
                 }}
               >
-                {node.id} {/* Display the node ID */}
+                {node.id}
               </motion.div>
             ))}
           </AnimatePresence>
+
+          {/* Render packets moving over links */}
+          {packets.map((packet) => {
+            const { x, y } = calculatePacketPosition(packet);
+            return (
+              <motion.div
+                key={packet.id}
+                className="packet"
+                style={{
+                  top: y - 5,
+                  left: x - 5,
+                }}
+                onMouseEnter={() => setHoveredPacket(packet)}
+                onMouseLeave={() => setHoveredPacket(null)}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              >
+                {hoveredPacket && hoveredPacket.id === packet.id && (
+                  <div className="packet-info">
+                    <p>Root ID: {packet.rootId}</p>
+                    <p>Hop Count: {packet.hopCount}</p>
+                    <p>Next Hop: {packet.nextHop}</p>
+                  </div>
+                )}
+              </motion.div>
+            );
+          })}
         </motion.div>
 
         {/* Node Information Table */}
         {selectedNode && (
           <div className="node-info">
             <h3>Node Information</h3>
-            <table>
-              <tbody>
-                <tr>
-                  <td>Root ID:</td>
-                  <td>{selectedNode.rootId}</td> {/* Node's root ID */}
-                </tr>
-                <tr>
-                  <td>Hop Count to Root:</td>
-                  <td>{selectedNode.hopCount}</td> {/* Node's hop count */}
-                </tr>
-                <tr>
-                  <td>Node Address:</td>
-                  <td>{selectedNode.id}</td> {/* Node ID as address */}
-                </tr>
-              </tbody>
-            </table>
+            <p>Root ID: {selectedNode.rootId}</p>
+            <p>Hop Count to Root: {selectedNode.hopCount}</p>
+            <p>Node Address: {selectedNode.id}</p>
 
             {/* Connections Table */}
             <h3>Connections</h3>
@@ -187,28 +348,28 @@ const Stp = () => {
                 </tr>
               </thead>
               <tbody>
-                {selectedNode.ports.map((port) => {
-                  const targetNode = nodes.find((node) => node.id === port.targetId);
-                  return (
-                    <tr key={port.portNumber}>
-                      <td>{port.portNumber}</td>
-                      <td>{targetNode ? targetNode.id : "Unknown"}</td>
-                      <td>{port.status}</td> {/* Display port status */}
-                    </tr>
-                  );
-                })}
+                {selectedNode.ports.map((port, index) => (
+                  <tr key={index}>
+                    <td>{port.portNumber}</td>
+                    <td>{port.targetId}</td>
+                    <td>{port.status}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
         )}
 
-        {/* Control Buttons */}
+        {/* Control Panel */}
         <div className="control-buttons">
           <button onClick={handleLink} disabled={!selectedNode || isLinking}>
-            {isLinking ? "Click a Node to Link" : "Link Node"}
+            {isLinking ? "Click to Link" : "Link Nodes"}
           </button>
           <button onClick={handleDelete} disabled={!selectedNode}>
             Delete Node
+          </button>
+          <button onClick={init_stp} disabled={!selectedNode}>
+            Start STP
           </button>
         </div>
       </div>

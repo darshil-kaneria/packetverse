@@ -127,3 +127,11 @@
 .node-info tr:last-child td {
     border-bottom: none;
 }
+
+.packet {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: red;
+    position: absolute;
+  }
