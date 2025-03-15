@@ -19,6 +19,7 @@ func NewHub() *Hub {
 		clients: make(map[*Client]bool),
 		register: make(chan *Client),
 		unregister: make(chan *Client),
+		broadcast: make(chan []byte),
 		
 	}
 }
@@ -39,6 +40,23 @@ func (h *Hub) Run() {
 			h.mu.Unlock()
 		case msg := <- h.broadcast:
 			log.Printf("Broadcast message: %s\n", string(msg))
+			h.mu.RLock()
+			for client := range h.clients {
+				select {
+				case client.send <- msg:
+				default:
+					// The client buffer is full
+					// For now, we will simply close the channel
+					// and remove the client
+					h.mu.RUnlock()
+					h.mu.Lock()
+					close(client.send)
+					delete(h.clients, client)
+					h.mu.Unlock()
+					h.mu.RLock()
+				}
+			}
+			h.mu.RUnlock()
 		}
 	}
 }
