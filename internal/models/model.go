@@ -58,23 +58,46 @@ func NewSession(id string) *Session {
 
 // TODO: This is just a skeleton, will be filling it later
 func (s *Session) AddSimulation(sim *SimulationInstance) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
+	s.Simulations[sim.ID] = sim
+	s.LastActive = time.Now()
 }
 
 func (s *Session) GetSimulation(id string) (*SimulationInstance, bool) {
-	return nil, false
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sim, exists := s.Simulations[id]
+	return sim, exists
 }
 
-func (s *Session) RemoveSimulation(id string) bool {
-	return false
+func (s *Session) RemoveSimulation(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.Simulations, id)
+	s.LastActive = time.Now()
 }
 
 func (s *Session) GetAllSimulations() []*SimulationInstance {
-	return nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sims := make([]*SimulationInstance, 0, len(s.Simulations))
+	for _, sim := range s.Simulations {
+		sims = append(sims, sim)
+	}
+
+	return sims
 }
 
 func (s *Session) UpdateLastActive() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
+	s.LastActive = time.Now()
 }
 
 func NewSimulationInstance(id string, simType SimulationType, config map[string]interface{}, engine simulation.Engine) *SimulationInstance {
